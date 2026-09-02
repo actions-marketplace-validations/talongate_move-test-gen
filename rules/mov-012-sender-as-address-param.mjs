@@ -12,9 +12,12 @@
  * AlphaFiTech/sui-ai-commons sui-move-auditor as a Sui-native pitfall.
  *
  * Detection: any public/entry function with a parameter whose name
- * suggests caller identity (sender, caller, user, owner, admin, signer,
- * authority, operator, from) AND whose type is bare `address` -- narrowed
- * to only where the finding is actionable:
+ * CONTAINS a word suggesting caller identity (sender, caller, user, owner,
+ * admin, signer, authority, operator, from -- matched per underscore/
+ * camelCase-split word, not only as the whole bare name, so
+ * `sender_address`/`senderAddress` fire exactly like `sender`) AND whose
+ * type is bare `address` -- narrowed to only where the finding is
+ * actionable:
  *
  * 1. The function must take a `TxContext` param. The rule's own
  *    prescribed fix, `tx_context::sender(ctx)`, needs one; a function
@@ -43,7 +46,35 @@ const RULE_ID = 'MOV-012';
 const SEVERITY = 'HIGH';
 const TITLE = 'sender identity taken as spoofable address parameter';
 
-const IDENTITY_NAMES = /^(?:sender|caller|user|owner|admin|signer|authority|operator|from)$/i;
+// Identity-relevance is decided per WORD, not by exact-matching the whole
+// parameter name: a name is split on underscores (Move's own naming
+// convention) and camelCase boundaries, then each resulting word is
+// tested for EXACT membership in this set -- the same shape #85 fixed for
+// MOV-008's payment names, applied here to identity names (this room's
+// own established approach for this exact defect family, reused rather
+// than re-invented). `sender_address`, `caller_addr`, `owner_account`,
+// `admin_id`, `the_sender`, and `senderAddress` therefore all match (a
+// word component equals a name here); `recipient` does NOT (no word
+// component of "recipient" equals a name -- the exact set membership
+// this narrowing depends on is unchanged, so #86's exclusion survives
+// unmodified); neither does a word that only shares a stem with a name,
+// deliberately -- "authorized" != "authority" -- so the set never
+// silently widens beyond what it names.
+const IDENTITY_NAMES = new Set([
+  'sender', 'caller', 'user', 'owner', 'admin', 'signer', 'authority', 'operator', 'from',
+]);
+
+// `[A-Za-z][A-Za-z0-9]*` is a single, unambiguous quantifier per match --
+// each starting position either extends maximally or fails immediately,
+// with no competing quantifier to backtrack against -- so a global scan
+// over a name of any length is linear, the same proven-safe shape #85
+// already shipped for this exact tokenization job.
+function containsIdentityWord(text) {
+  const words = (text.match(/[A-Za-z][A-Za-z0-9]*/g) || [])
+    .flatMap((tok) => tok.split(/(?=[A-Z])/))
+    .map((w) => w.toLowerCase());
+  return words.some((w) => IDENTITY_NAMES.has(w));
+}
 
 /**
  * @param {string} source — file content
@@ -111,7 +142,7 @@ export function check(source, filename) {
     if (!hasCtx) continue;
 
     for (const { name: paramName, type: paramType } of params) {
-      if (IDENTITY_NAMES.test(paramName) && paramType === 'address') {
+      if (containsIdentityWord(paramName) && paramType === 'address') {
         findings.push({
           rule: RULE_ID,
           severity: SEVERITY,
