@@ -27,6 +27,26 @@
  * `hasCtx` still resolves the LAST segment of a qualified path
  * (`ctx: &mut sui::tx_context::TxContext` must count) without becoming a
  * substring match (`MyTxContextWrapper` must not falsely count).
+ *
+ * INSPECT BOUNCE, fixed here:
+ *   F1 · MEDIUM (regression the widening introduced): the set still
+ *     holds `owner`/`admin`, so `new_owner`/`new_admin`/`previous_owner`
+ *     -- #86's own excluded destination/record class -- matched again
+ *     once matching went per-word. Fixed by subtracting a destination-
+ *     prefix set (`new_`/`next_`/`previous_`/`old_`/`target_`) BEFORE
+ *     the identity-word test: any of those words anywhere in the name
+ *     vetoes the WHOLE name, not just that one word, so `new_owner` and
+ *     `recipient_address` land on the same (clean) side, as they must.
+ *   F2 · LOW (reporting honesty): "corpus 0 findings both sides" is true
+ *     and is NOT evidence this widening is false-positive-safe -- see
+ *     this unit's own craft-memory topic file and commit message for the
+ *     corrected wording (the corpus's decorated identity params all lack
+ *     TxContext, so the corpus cannot exercise this change either way).
+ *     No code or fixture change here; disclosed in the report only.
+ *   F3 · LOW: `QUALIFIED_CTX` below now uses BARE `sender`, isolating the
+ *     one thing it claims to test (qualified-path resolution) from the
+ *     naming fix -- it previously used `sender_address`, so its pre-fix
+ *     failure was caused by the compound name, not by `hasCtx` itself.
  */
 import { check } from '../../../../rules/mov-012-sender-as-address-param.mjs';
 
@@ -62,6 +82,26 @@ for (const paramName of ['caller_addr', 'owner_account', 'admin_id', 'the_sender
   assert(`${paramName}: address fires`, findings.length === 1);
 }
 
+// ── INSPECT F1: #86's excluded "destination" class must NOT return
+// through a different word. #86 removed `recipient` because a
+// DESTINATION the caller may legitimately choose is not an identity
+// claim; the set still holds `owner`/`admin`, so once matching went
+// per-word, a destination DECORATED with one of those words matched
+// again -- `new_owner` (the canonical Sui ownership-transfer idiom,
+// `transfer_ownership(new_owner: address, ctx)`) is the same shape as
+// `recipient_address` and must land on the same (clean) side. All four
+// measured pre-bounce, all must be 0 post-fix. ──────────────────────────
+
+for (const paramName of ['new_owner', 'new_admin', 'previous_owner', 'recipient_address']) {
+  const findings = check(withdrawSrc(paramName), 'x.move');
+  assert(`${paramName}: address stays clean (destination/record, not an identity claim -- F1)`, findings.length === 0);
+}
+
+// A destination-prefix word must be matched EXACTLY, never as a substring
+// of an unrelated word -- "renewed" contains "new" but is not "new".
+const renewedFindings = check(withdrawSrc('renewed_sender'), 'x.move');
+assert('renewed_sender still fires ("renewed" != "new", no substring match on the destination-prefix guard)', renewedFindings.length === 1);
+
 // ── #86's negatives must survive unmodified ─────────────────────────────
 
 const recipientFindings = check(withdrawSrc('recipient'), 'x.move');
@@ -77,17 +117,25 @@ const NO_CTX = `module demo::pay {
 }`;
 assert('no TxContext parameter -> no finding (prescribed fix is unactionable) -- #86 unchanged', check(NO_CTX, 'x.move').length === 0);
 
-// hasCtx must still resolve the LAST segment of a qualified path, and
-// must NOT become a substring match -- both #86 fail-open/fail-closed
-// guards, re-verified here rather than assumed still true.
+// hasCtx must still resolve the LAST segment of a qualified path -- an
+// UNCHANGED-INVARIANT control, deliberately using the BARE `sender` name
+// (INSPECT F3: the earlier version of this fixture used `sender_address`,
+// so its pre-fix failure was caused by the NAME not matching, not by
+// qualified-path resolution -- hasCtx and the param-type resolution are
+// byte-identical before and after this fix. Bare `sender` isolates the
+// ONE thing this assertion claims to test.)
 const QUALIFIED_CTX = `module demo::pay {
-    public fun withdraw(sender_address: address, amount: u64, ctx: &mut sui::tx_context::TxContext): u64 {
-        assert!(sender_address == ctx.sender(), 0);
+    public fun withdraw(sender: address, amount: u64, ctx: &mut sui::tx_context::TxContext): u64 {
+        assert!(sender == ctx.sender(), 0);
         amount
     }
 }`;
-assert('a qualified sui::tx_context::TxContext still resolves as ctx (last-segment match)', check(QUALIFIED_CTX, 'x.move').length === 1);
+assert('a qualified sui::tx_context::TxContext still resolves as ctx (last-segment match) -- unchanged invariant, bare name isolates this from the naming fix', check(QUALIFIED_CTX, 'x.move').length === 1);
 
+// MyTxContextWrapper is a LIVE guard on this branch (unlike the fixture
+// above): it uses `sender_address`, the new name shape, deliberately --
+// a substring-match regression introduced by ANY future change here would
+// flip this to 1, and it is worth catching with the decorated name too.
 const FAKE_CTX_TYPE = `module demo::pay {
     public fun withdraw(sender_address: address, amount: u64, ctx: MyTxContextWrapper): u64 {
         amount
@@ -142,5 +190,5 @@ if (errs.length) {
   for (const e of errs) console.log(`  ✗ ${e}`);
   process.exit(1);
 }
-console.log('MOV-012 identity-name decoration bypass fixed: sender_address/caller_addr/owner_account/admin_id/the_sender/senderAddress all fire like their bare forms; recipient stays clean, from still fires, the no-TxContext gate and the qualified-path/substring hasCtx guards are unchanged; stem-sharing does not fire; a 40,000-char identifier does not regress the bound');
+console.log('MOV-012 identity-name decoration bypass fixed: sender_address/caller_addr/owner_account/admin_id/the_sender/senderAddress all fire like their bare forms; new_owner/new_admin/previous_owner/recipient_address correctly stay clean (destination/record, not an identity claim -- F1); recipient stays clean, from still fires, the no-TxContext gate and the qualified-path/substring hasCtx guards are unchanged; stem-sharing does not fire; a 40,000-char identifier does not regress the bound');
 process.exit(0);

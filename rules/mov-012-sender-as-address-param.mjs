@@ -27,11 +27,15 @@
  *    check where `sender` is hashed INTO the leaf and validated against
  *    the root -- passing someone else's address there proves only
  *    their membership and grants the caller nothing.
- * 2. `recipient` is not in the identity-name list. A destination names
- *    where value is going -- a target the caller is entitled to choose
- *    -- not an assertion about who the caller is, unlike a claimed
- *    SOURCE (`from`), which stays spoofable in the way a chosen
- *    destination is not.
+ * 2. `recipient` is not in the identity-name list, and a name carrying a
+ *    destination/record prefix (`new_`, `next_`, `previous_`, `old_`,
+ *    `target_` -- e.g. `new_owner`, `previous_admin`) is excluded even
+ *    though it contains an identity word. A destination names where
+ *    value is going -- a target the caller is entitled to choose -- not
+ *    an assertion about who the caller is, unlike a claimed SOURCE
+ *    (`from`), which stays spoofable in the way a chosen destination is
+ *    not; a `previous_`/`old_`-prefixed name records a PRIOR value, not
+ *    a claim about the current caller either.
  *
  * Measured false positives this closes, all three from SuiTears
  * (eval/scenarios/08-suitears-oracle, 09-suitears-farm): airdrop.move's
@@ -64,15 +68,44 @@ const IDENTITY_NAMES = new Set([
   'sender', 'caller', 'user', 'owner', 'admin', 'signer', 'authority', 'operator', 'from',
 ]);
 
+// INSPECT F1: going per-word re-admitted #86's own excluded class through
+// a different word. #86 removed `recipient` on the principle that a
+// DESTINATION the caller may legitimately choose is not an assertion
+// about who the caller IS. The set still holds `owner`/`admin`, so once
+// matching went per-word, `new_owner`/`previous_owner`/`new_admin` all
+// matched again -- the exclusion bypassed by decoration, the mirror image
+// of the defect this file exists to fix. `new_owner` is the canonical Sui
+// ownership-transfer idiom (`transfer_ownership(new_owner: address, ctx)`
+// where the CALLER is already authenticated via ctx and `new_owner` is who
+// they are handing the object TO), and the rule's own emitted remedy --
+// "use tx_context::sender(ctx) instead" -- is nonsensical there: that
+// would make the caller the new owner, not what the function does.
+//
+// Fixed by subtracting a destination/record-prefix set BEFORE the
+// identity-word test: if any tokenized word is one of these prefixes, the
+// whole name is treated as naming a destination or a prior-state record,
+// never an identity claim, regardless of which identity word also
+// appears. This is deliberately a WHOLE-NAME veto, not a per-word one --
+// `new_owner` and `recipient_address` must land on the same side (they
+// are the same shape: a destination address, decorated), so a
+// destination-prefix word anywhere in the name suppresses the whole
+// parameter rather than only the one word next to it.
+const DESTINATION_PREFIXES = new Set(['new', 'next', 'previous', 'old', 'target']);
+
 // `[A-Za-z][A-Za-z0-9]*` is a single, unambiguous quantifier per match --
 // each starting position either extends maximally or fails immediately,
 // with no competing quantifier to backtrack against -- so a global scan
 // over a name of any length is linear, the same proven-safe shape #85
 // already shipped for this exact tokenization job.
-function containsIdentityWord(text) {
-  const words = (text.match(/[A-Za-z][A-Za-z0-9]*/g) || [])
+function tokenizeWords(text) {
+  return (text.match(/[A-Za-z][A-Za-z0-9]*/g) || [])
     .flatMap((tok) => tok.split(/(?=[A-Z])/))
     .map((w) => w.toLowerCase());
+}
+
+function containsIdentityWord(text) {
+  const words = tokenizeWords(text);
+  if (words.some((w) => DESTINATION_PREFIXES.has(w))) return false;
   return words.some((w) => IDENTITY_NAMES.has(w));
 }
 
