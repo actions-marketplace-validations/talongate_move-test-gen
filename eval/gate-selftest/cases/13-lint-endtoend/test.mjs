@@ -49,8 +49,8 @@ const high = run(makeTree(HIGH));
 const highOut = (high.stdout || '') + (high.stderr || '');
 if (high.status === 0) errs.push('a HIGH lint finding did not fail the gate (exit 0)');
 if (!/MOV-001/.test(highOut)) errs.push('MOV-001 did not fire on a function that mutates state with no capability');
-if (!/Security Lint \(9 rules\)/.test(highOut)) {
-  errs.push(`rule discovery did not report 9 rules: ${(highOut.match(/Security Lint \([^)]*\)/) || ['<absent>'])[0]}`);
+if (!/Security Lint \(10 rules\)/.test(highOut)) {
+  errs.push(`rule discovery did not report 10 rules: ${(highOut.match(/Security Lint \([^)]*\)/) || ['<absent>'])[0]}`);
 }
 
 const clean = run(makeTree(CLEAN));
@@ -62,5 +62,5 @@ if (errs.length) {
   for (const e of errs) console.log(`  ${e}`);
   process.exit(1);
 }
-console.log('lint runs end-to-end: 9 rules discovered, HIGH fails, clean passes');
+console.log('lint runs end-to-end: 10 rules discovered, HIGH fails, clean passes');
 process.exit(0);
