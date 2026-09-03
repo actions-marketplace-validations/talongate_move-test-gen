@@ -13,10 +13,12 @@
  * `lint.mjs` (all nine MOV rules) and `check-coverage.mjs` share this one
  * walker.
  *
- * Fixed by resolving a link entry (`realpathSync.native` + `statSync`,
- * matching the compiler's own `follow_links(true)` semantics) and
- * recursing when the target is a directory. Two things this fix must NOT
- * do while closing the omission:
+ * Fixed by resolving a link entry (`realpathSync.native` + `statSync`)
+ * and recursing when the target is a directory. This walker's parity with
+ * the compiler is scoped to WHICH FILES ARE SEEN, not to cycle
+ * diagnostics -- see the code comment at the cycle guard in
+ * scripts/walk-dir.mjs for the source-verified (docs.rs/walkdir) detail.
+ * Two things this fix must NOT do while closing the omission:
  *   - Loop forever on a symlink cycle -- a `Set` of visited REAL paths
  *     (not link paths) makes a cycle terminate on first re-visit rather
  *     than blowing the stack.
@@ -30,24 +32,67 @@
  *     failure the walker never had visibility into; a broken link is a
  *     failure the walker already knows by name.
  *
+ * INSPECT BOUNCE, fixed here:
+ *   F1 · MEDIUM: this file previously caught junction-creation failures
+ *     per-fixture with a printed `skip-note:` and fell through to
+ *     `process.exit(0)` regardless -- on a box without reparse-point
+ *     support (an unprivileged runner, a filesystem without junctions),
+ *     every symlink-dependent assertion silently never ran and the case
+ *     still reported PASS. Fixed by testing junction capability ONCE, at
+ *     the very top, before any assertion runs -- exactly the pattern
+ *     `cases/08-baseline-zero-tests` already uses for its own `sui`-CLI
+ *     capability gate (`process.exit(2)`, honoured by
+ *     `eval/gate-selftest/run.mjs:52`, which is where the suite's own
+ *     "1 skipped" already comes from). Unavailable capability now means
+ *     this WHOLE case reports a visible SKIP, never a silent PASS -- the
+ *     one skippable leg this file has, tested first, not interleaved
+ *     with the unconditional assertions.
+ *   F2 · LOW: this docstring's own parity claim, corrected above and in
+ *     scripts/walk-dir.mjs's own comment, now cites walkdir's actual
+ *     documentation rather than asserting parity unverified.
+ *   F3 · LOW: cost is named in scripts/walk-dir.mjs's own comment at the
+ *     symlink-resolution site; not re-measured here (see this unit's own
+ *     craft-memory topic file for the numbers).
+ *
  * Windows note: creating a real symlink needs elevated privilege; a
  * DIRECTORY JUNCTION (`fs.symlinkSync(target, path, 'junction')`) does
  * not -- this room's own hard-won lesson. Every fixture below uses a
- * junction so this test never requires an elevated shell. A symlinked
- * individual FILE (as opposed to a directory) was never part of this
- * defect -- `entry.name.endsWith(ext)` already matched a file symlink's
- * NAME under the pre-fix code regardless of what it pointed at -- and
- * file-symlink creation genuinely does need elevation on Windows, so it
- * is checked by code inspection only (the new `isSymbolicLink()` branch
- * reaches the identical `entry.name.endsWith(ext)` test, just via a
- * different path than before), not by a live fixture here.
+ * junction, gated behind the single capability check at the top. A
+ * symlinked individual FILE (as opposed to a directory) was never part
+ * of this defect -- `entry.name.endsWith(ext)` already matched a file
+ * symlink's NAME under the pre-fix code regardless of what it pointed at
+ * -- and file-symlink creation genuinely does need elevation on Windows,
+ * so it is checked by code inspection only (the new `isSymbolicLink()`
+ * branch reaches the identical `entry.name.endsWith(ext)` test, just via
+ * a different path than before), not by a live fixture here.
  */
-import { mkdtempSync, mkdirSync, writeFileSync, symlinkSync, rmSync } from 'fs';
+import { mkdtempSync, mkdirSync, writeFileSync, symlinkSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
 import { spawnSync } from 'child_process';
 
 import { walkDir } from '../../../../scripts/walk-dir.mjs';
+
+function freshDir(prefix) {
+  return mkdtempSync(join(tmpdir(), prefix));
+}
+
+// ── Capability gate, FIRST, before any assertion runs (INSPECT F1) ─────
+// Matches cases/08-baseline-zero-tests exactly: probe the capability the
+// WHOLE file depends on, print one SKIPPED line, and exit(2) immediately
+// if it is unavailable -- never fall through to a partial run that still
+// reports PASS. This branch is HELD and ships later, on a box that is
+// not this one; a vacuous green here is exactly what a held security fix
+// cannot afford.
+{
+  const capabilityBase = freshDir('mtg-walkdir-capability-');
+  try {
+    symlinkSync(capabilityBase, join(capabilityBase, 'self_probe'), 'junction');
+  } catch (err) {
+    console.log(`walkdir-symlink selftest: SKIPPED (directory junction creation unavailable on this box: ${err.code || err.message})`);
+    process.exit(2);
+  }
+}
 
 const errs = [];
 function assert(label, cond) {
@@ -55,10 +100,6 @@ function assert(label, cond) {
 }
 
 const LINT_CLI = join('scripts', 'lint.mjs');
-
-function freshDir(prefix) {
-  return mkdtempSync(join(tmpdir(), prefix));
-}
 
 // ── Ordinary dirs/files: behaviour must stay byte-identical ────────────
 
@@ -97,79 +138,65 @@ const DRAIN_MODULE = (moduleName) => `module probe::${moduleName} {
 `;
 writeFileSync(join(pkgSources, 'direct.move'), DRAIN_MODULE('direct'));
 writeFileSync(join(outside, 'hidden.move'), DRAIN_MODULE('hidden'));
+symlinkSync(outside, join(pkgSources, 'linked'), 'junction');
 
-let junctionUnavailable = false;
-try {
-  symlinkSync(outside, join(pkgSources, 'linked'), 'junction');
-} catch (err) {
-  junctionUnavailable = true;
-  console.log(`skip-note: directory junction creation failed unexpectedly (${err.code || err.message}) -- this box normally allows junctions with no elevation`);
-}
+// walkDir() itself must see both files
+const walked = walkDir(pkgSources, '.move');
+assert('walkDir() follows the junction: both direct.move and hidden.move are seen', walked.length === 2 && walked.some(r => r.endsWith('direct.move')) && walked.some(r => r.endsWith('hidden.move')));
 
-if (!junctionUnavailable) {
-  // walkDir() itself must see both files
-  const walked = walkDir(pkgSources, '.move');
-  assert('walkDir() follows the junction: both direct.move and hidden.move are seen', walked.length === 2 && walked.some(r => r.endsWith('direct.move')) && walked.some(r => r.endsWith('hidden.move')));
+// through the real lint.mjs CLI: must fire HIGH on BOTH modules (same
+// finding as the flattened control, per the advisory's own draft)
+const linked = spawnSync(process.execPath, [LINT_CLI, pkgSources], { encoding: 'utf8', timeout: 30000 });
+const linkedOut = (linked.stdout || '') + (linked.stderr || '');
+assert('linked layout: exit 1 (a HIGH finding exists)', linked.status === 1);
+assert('linked layout: MOV-001 fires on direct.move', /direct\.move.*MOV-001/.test(linkedOut) || /MOV-001.*direct\.move/.test(linkedOut));
+assert('linked layout: MOV-001 ALSO fires on hidden.move (behind the junction -- this is the bug, fixed)', /hidden\.move/.test(linkedOut));
+assert('linked layout: 2 findings total, matching the flattened control below', /2 finding/.test(linkedOut));
 
-  // through the real lint.mjs CLI: must fire HIGH on BOTH modules (same
-  // finding as the flattened control, per the advisory's own draft)
-  const linked = spawnSync(process.execPath, [LINT_CLI, pkgSources], { encoding: 'utf8', timeout: 30000 });
-  const linkedOut = (linked.stdout || '') + (linked.stderr || '');
-  assert('linked layout: exit 1 (a HIGH finding exists)', linked.status === 1);
-  assert('linked layout: MOV-001 fires on direct.move', /direct\.move.*MOV-001/.test(linkedOut) || /MOV-001.*direct\.move/.test(linkedOut));
-  assert('linked layout: MOV-001 ALSO fires on hidden.move (behind the junction -- this is the bug, fixed)', /hidden\.move/.test(linkedOut));
-  assert('linked layout: 2 findings total, matching the flattened control below', /2 finding/.test(linkedOut));
-
-  // control: the flattened layout (no symlink) must find the identical 2
-  const flatBase = freshDir('mtg-walkdir-flat-');
-  writeFileSync(join(flatBase, 'direct.move'), DRAIN_MODULE('direct'));
-  writeFileSync(join(flatBase, 'hidden.move'), DRAIN_MODULE('hidden'));
-  const flat = spawnSync(process.execPath, [LINT_CLI, flatBase], { encoding: 'utf8', timeout: 30000 });
-  const flatOut = (flat.stdout || '') + (flat.stderr || '');
-  assert('flattened control: exit 1, 2 findings (same as the linked layout above)', flat.status === 1 && /2 finding/.test(flatOut));
-} else {
-  console.log('skip-note: advisory regression fixture skipped (junction unavailable on this box)');
-}
+// control: the flattened layout (no symlink) must find the identical 2
+const flatBase = freshDir('mtg-walkdir-flat-');
+writeFileSync(join(flatBase, 'direct.move'), DRAIN_MODULE('direct'));
+writeFileSync(join(flatBase, 'hidden.move'), DRAIN_MODULE('hidden'));
+const flat = spawnSync(process.execPath, [LINT_CLI, flatBase], { encoding: 'utf8', timeout: 30000 });
+const flatOut = (flat.stdout || '') + (flat.stderr || '');
+assert('flattened control: exit 1, 2 findings (same as the linked layout above)', flat.status === 1 && /2 finding/.test(flatOut));
 
 // ── Cycle guard: a junction loop must terminate, not blow the stack ────
+// (Termination and file coverage are asserted here; the compiler's own
+// cycle-diagnostic divergence -- an error yielded, vs this walker's
+// silent prune -- is disclosed in scripts/walk-dir.mjs's own comment and
+// in this unit's craft-memory report, not re-asserted as a behaviour
+// pin: there is no diagnostic output from this walker to pin.)
 
 {
   const cycleBase = freshDir('mtg-walkdir-cyclea-');
   const cycleB = freshDir('mtg-walkdir-cycleb-');
   writeFileSync(join(cycleB, 'in_b.move'), 'module d::b {}');
-  try {
-    symlinkSync(cycleB, join(cycleBase, 'to_b'), 'junction');
-    symlinkSync(cycleBase, join(cycleB, 'back_to_a'), 'junction');
-    const t0 = Date.now();
-    const results = walkDir(cycleBase, '.move');
-    const ms = Date.now() - t0;
-    assert('symlink cycle terminates and finds in_b.move exactly once (no infinite loop)', results.filter(r => r.endsWith('in_b.move')).length === 1);
-    assert(`symlink cycle completes within a generous 2000ms ceiling (got ${ms}ms) -- loose regression tripwire, not a perf SLA`, ms < 2000);
-  } catch (err) {
-    console.log(`skip-note: cycle-guard fixture skipped (junction creation failed: ${err.code || err.message})`);
-  }
+  symlinkSync(cycleB, join(cycleBase, 'to_b'), 'junction');
+  symlinkSync(cycleBase, join(cycleB, 'back_to_a'), 'junction');
+  const t0 = Date.now();
+  const results = walkDir(cycleBase, '.move');
+  const ms = Date.now() - t0;
+  assert('symlink cycle terminates and finds in_b.move exactly once (no infinite loop)', results.filter(r => r.endsWith('in_b.move')).length === 1);
+  assert(`symlink cycle completes within a generous 2000ms ceiling (got ${ms}ms) -- loose regression tripwire, not a perf SLA`, ms < 2000);
 }
 
 // ── Dangling link: a HARD ERROR, never a silent skip ────────────────────
 
 {
   const danglingBase = freshDir('mtg-walkdir-dangling-');
+  const ghostTarget = join(danglingBase, 'this_path_never_exists');
+  symlinkSync(ghostTarget, join(danglingBase, 'ghost'), 'junction');
+  let threw = false;
+  let message = '';
   try {
-    const ghostTarget = join(danglingBase, 'this_path_never_exists');
-    symlinkSync(ghostTarget, join(danglingBase, 'ghost'), 'junction');
-    let threw = false;
-    let message = '';
-    try {
-      walkDir(danglingBase, '.move');
-    } catch (err) {
-      threw = true;
-      message = err.message;
-    }
-    assert('a dangling link throws (never silently dropped from the walk)', threw);
-    assert('the thrown error names the unresolvable symlink', /cannot resolve symlink/.test(message));
+    walkDir(danglingBase, '.move');
   } catch (err) {
-    console.log(`skip-note: dangling-link fixture skipped (junction creation failed: ${err.code || err.message})`);
+    threw = true;
+    message = err.message;
   }
+  assert('a dangling link throws (never silently dropped from the walk)', threw);
+  assert('the thrown error names the unresolvable symlink', /cannot resolve symlink/.test(message));
 }
 
 // ── Link to a FILE, not a directory: walkDir() must not throw or hang ──
@@ -186,22 +213,17 @@ if (!junctionUnavailable) {
   // false branch without needing file-symlink privilege.
   const aFile = join(linkToFileParentBase, 'a_real_file.move');
   writeFileSync(aFile, 'module d::real {}');
+  symlinkSync(aFile, join(linkToFileParentBase, 'junction_to_a_file'), 'junction');
+  const t0 = Date.now();
   try {
-    symlinkSync(aFile, join(linkToFileParentBase, 'junction_to_a_file'), 'junction');
-    let threwOrHung = false;
-    const t0 = Date.now();
-    try {
-      walkDir(linkToFileParentBase, '.move');
-    } catch {
-      // A junction-to-a-file may itself fail to resolve depending on the
-      // OS/Node version -- either a clean non-throwing walk or a clean
-      // thrown resolution error is acceptable; a HANG is not.
-    }
-    const ms = Date.now() - t0;
-    assert(`a junction pointed at a file does not hang (${ms}ms)`, ms < 2000);
-  } catch (err) {
-    console.log(`skip-note: junction-to-file fixture skipped (junction creation failed: ${err.code || err.message})`);
+    walkDir(linkToFileParentBase, '.move');
+  } catch {
+    // A junction-to-a-file may itself fail to resolve depending on the
+    // OS/Node version -- either a clean non-throwing walk or a clean
+    // thrown resolution error is acceptable; a HANG is not.
   }
+  const ms = Date.now() - t0;
+  assert(`a junction pointed at a file does not hang (${ms}ms)`, ms < 2000);
 }
 
 // ── Deep nest: bounded time, no stack blow-up from ordinary recursion ──
