@@ -5,6 +5,41 @@ Notable changes per released tag. Dates are the tag's commit date.
 Generated from `git log` between tags — if an entry looks wrong, the commit
 history is the source of truth.
 
+## v1.6.1 — 2026-09-10
+
+Accuracy and coverage patch — 43 commits from @HetCreep plus three security advisories.
+
+### New rule
+
+- **MOV-013** [HIGH] — `#[spec_only]` public functions ship in production bytecode with zero access control. Same class as the CDPM $300K drain.
+
+### Fixes (rules)
+
+- **MOV-002** bit-shift detection was wrong in both directions (fail-open on some patterns, false positive on others). Rewritten.
+- **MOV-006** now detects shared abort codes in single-line function bodies.
+- **MOV-008** no longer flags test bodies; catches snake_case payment names (`total_amount`, `deposit_fee`).
+- **MOV-011** catches attribute-prefixed and line-wrapped `entry` declarations; closes a latent param bug.
+- **MOV-012** narrows to actionable identity claims, closing 3 corpus FPs. Also catches decorated names (`sender_address`, `caller_addr`).
+
+### Fixes (parser / infra)
+
+- Parser attaches `#[test_only]` / `#[test]` by item boundary instead of leaking onto the next function.
+- Parser recognizes `macro fun` bodies and `$`-prefixed operands — four rules were blind to macro functions.
+- Unparseable Move source now fails the run instead of reading as clean (fail-open → fail-closed).
+- `walk-dir.mjs` follows symlinked source directories.
+
+### Security advisories
+
+- [GHSA-vvr3](https://github.com/talongate/move-test-gen/security/advisories/GHSA-vvr3-fhhp-wvhq) — MOV-012 decorated name bypass
+- [GHSA-xc3j](https://github.com/talongate/move-test-gen/security/advisories/GHSA-xc3j-493g-97q6) — missing `#[spec_only]` detection rule
+- [GHSA-mwqv](https://github.com/talongate/move-test-gen/security/advisories/GHSA-mwqv-cfjv-p4cc) — symlink directory skip
+
+### Stats
+
+- Lint rules: 9 → 10 files (11 checks)
+- gate-selftest: 14 → 25 cases
+- Contributors: mehvetero (193) + @HetCreep (95)
+
 ## v1.6.0 — 2026-08-26
 
 New lint rules and accuracy improvements. Three of the new checks were inspired by patterns documented in @jangid's [sui-move-auditor](https://github.com/AlphaFiTech/sui-ai-commons) — the exact-equality payment assert, bit-shift silent wrapping, and sender-as-address spoofability. Credited because that's where the signal came from.

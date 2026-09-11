@@ -119,6 +119,7 @@ node scripts/check-coverage.mjs ./sources ./tests --lint
 | **MOV-008** | MEDIUM | `assert!(payment == required)` exact-equality check on a caller-controlled amount — dust/rounding/fee-on-transfer breaks it; use `>=` instead |
 | **MOV-011** | HIGH | `public(package) entry` function — the `entry` modifier makes it callable via PTB from outside the package despite the `package` restriction |
 | **MOV-012** | HIGH | Sender/caller identity taken as a plain `address` parameter instead of `tx_context::sender(ctx)` — spoofable by any PTB caller |
+| **MOV-013** | HIGH | `#[spec_only]` public function compiles into production bytecode with zero access control — same class as the CDPM $300K drain |
 
 Rules are pure functions in `rules/*.mjs`. The engine skips `#[test_only]` modules and `#[test]` function bodies automatically. MOV-002 and MOV-004 use a lightweight Move parser (`scripts/move-parser.mjs`) to track variable types through declarations, casts, and naming conventions — if an operand is known u128/u256, the finding is suppressed instead of relying on suffix heuristics.
 
@@ -243,7 +244,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: talongate/move-test-gen@v1.6.0
+      - uses: talongate/move-test-gen@v1.6.1
         with:
           sources: sources
           tests: tests
