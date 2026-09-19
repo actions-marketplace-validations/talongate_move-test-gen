@@ -1,0 +1,5 @@
+{
+  "note": "Two defects, one class: the tool could not read the source and still reported CLEAN. U1: a whitespace-collapsed one-line module made parseModule() return zero functions -- re-measured 1->5 of 7 rules on the one-line form (MOV-001/MOV-005 stay a documented gap, own independent scanners; MOV-008 is conditional on no later != sharing the physical line, a pre-existing move-parser.mjs quirk made newly reachable). U2: an unterminated /* blanked the file to EOF with no signal -- fixed in BOTH entry points (lint.mjs's own CLI AND check-coverage.mjs --lint, the path the GitHub Action actually runs; the first version fixed only the former). Fixed at the mechanism, never by pre-formatting source or touching a rule file.",
+  "type": "script",
+  "script": "test.mjs"
+}

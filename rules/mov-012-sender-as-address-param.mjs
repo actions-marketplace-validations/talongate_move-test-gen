@@ -12,15 +12,102 @@
  * AlphaFiTech/sui-ai-commons sui-move-auditor as a Sui-native pitfall.
  *
  * Detection: any public/entry function with a parameter whose name
- * suggests caller identity (sender, caller, user, owner, admin, signer,
- * authority, operator) AND whose type is bare `address`.
+ * CONTAINS a word suggesting caller identity (sender, caller, user, owner,
+ * admin, signer, authority, operator, from -- matched per underscore/
+ * camelCase-split word, not only as the whole bare name, so
+ * `sender_address`/`senderAddress` fire exactly like `sender`) AND whose
+ * type is bare `address` -- narrowed to only where the finding is
+ * actionable:
+ *
+ * 1. The function must take a `TxContext` param. The rule's own
+ *    prescribed fix, `tx_context::sender(ctx)`, needs one; a function
+ *    with no TxContext cannot apply it, so a finding there is not
+ *    actionable. This also correctly excludes a pure helper like
+ *    `verify(root, proof, amount, sender: address)`, a Merkle-leaf
+ *    check where `sender` is hashed INTO the leaf and validated against
+ *    the root -- passing someone else's address there proves only
+ *    their membership and grants the caller nothing.
+ * 2. `recipient` is not in the identity-name list, and a name carrying a
+ *    destination/record prefix (`new_`, `next_`, `previous_`, `old_`,
+ *    `target_` -- e.g. `new_owner`, `previous_admin`) is excluded even
+ *    though it contains an identity word. A destination names where
+ *    value is going -- a target the caller is entitled to choose -- not
+ *    an assertion about who the caller is, unlike a claimed SOURCE
+ *    (`from`), which stays spoofable in the way a chosen destination is
+ *    not; a `previous_`/`old_`-prefixed name records a PRIOR value, not
+ *    a claim about the current caller either.
+ *
+ * Measured false positives this closes, all three from SuiTears
+ * (eval/scenarios/08-suitears-oracle, 09-suitears-farm): airdrop.move's
+ * and linear_vesting_airdrop.move's `has_account_claimed(..., user:
+ * address): bool`, read-only views where querying another address is
+ * the intended use; airdrop_utils.move's `verify(..., sender: address):
+ * u256`, the Merkle-leaf helper above -- none of the three takes a
+ * TxContext at all.
  */
 
 const RULE_ID = 'MOV-012';
 const SEVERITY = 'HIGH';
 const TITLE = 'sender identity taken as spoofable address parameter';
 
-const IDENTITY_NAMES = /^(?:sender|caller|user|owner|admin|signer|authority|operator|from|recipient)$/i;
+// Identity-relevance is decided per WORD, not by exact-matching the whole
+// parameter name: a name is split on underscores (Move's own naming
+// convention) and camelCase boundaries, then each resulting word is
+// tested for EXACT membership in this set -- the same shape #85 fixed for
+// MOV-008's payment names, applied here to identity names (this room's
+// own established approach for this exact defect family, reused rather
+// than re-invented). `sender_address`, `caller_addr`, `owner_account`,
+// `admin_id`, `the_sender`, and `senderAddress` therefore all match (a
+// word component equals a name here); `recipient` does NOT (no word
+// component of "recipient" equals a name -- the exact set membership
+// this narrowing depends on is unchanged, so #86's exclusion survives
+// unmodified); neither does a word that only shares a stem with a name,
+// deliberately -- "authorized" != "authority" -- so the set never
+// silently widens beyond what it names.
+const IDENTITY_NAMES = new Set([
+  'sender', 'caller', 'user', 'owner', 'admin', 'signer', 'authority', 'operator', 'from',
+]);
+
+// INSPECT F1: going per-word re-admitted #86's own excluded class through
+// a different word. #86 removed `recipient` on the principle that a
+// DESTINATION the caller may legitimately choose is not an assertion
+// about who the caller IS. The set still holds `owner`/`admin`, so once
+// matching went per-word, `new_owner`/`previous_owner`/`new_admin` all
+// matched again -- the exclusion bypassed by decoration, the mirror image
+// of the defect this file exists to fix. `new_owner` is the canonical Sui
+// ownership-transfer idiom (`transfer_ownership(new_owner: address, ctx)`
+// where the CALLER is already authenticated via ctx and `new_owner` is who
+// they are handing the object TO), and the rule's own emitted remedy --
+// "use tx_context::sender(ctx) instead" -- is nonsensical there: that
+// would make the caller the new owner, not what the function does.
+//
+// Fixed by subtracting a destination/record-prefix set BEFORE the
+// identity-word test: if any tokenized word is one of these prefixes, the
+// whole name is treated as naming a destination or a prior-state record,
+// never an identity claim, regardless of which identity word also
+// appears. This is deliberately a WHOLE-NAME veto, not a per-word one --
+// `new_owner` and `recipient_address` must land on the same side (they
+// are the same shape: a destination address, decorated), so a
+// destination-prefix word anywhere in the name suppresses the whole
+// parameter rather than only the one word next to it.
+const DESTINATION_PREFIXES = new Set(['new', 'next', 'previous', 'old', 'target']);
+
+// `[A-Za-z][A-Za-z0-9]*` is a single, unambiguous quantifier per match --
+// each starting position either extends maximally or fails immediately,
+// with no competing quantifier to backtrack against -- so a global scan
+// over a name of any length is linear, the same proven-safe shape #85
+// already shipped for this exact tokenization job.
+function tokenizeWords(text) {
+  return (text.match(/[A-Za-z][A-Za-z0-9]*/g) || [])
+    .flatMap((tok) => tok.split(/(?=[A-Z])/))
+    .map((w) => w.toLowerCase());
+}
+
+function containsIdentityWord(text) {
+  const words = tokenizeWords(text);
+  if (words.some((w) => DESTINATION_PREFIXES.has(w))) return false;
+  return words.some((w) => IDENTITY_NAMES.has(w));
+}
 
 /**
  * @param {string} source — file content
@@ -73,14 +160,22 @@ export function check(source, filename) {
     }
     paramStr = paramStr.slice(1); // remove leading (
 
-    // parse each parameter
-    const params = paramStr.split(',').map(p => p.trim()).filter(Boolean);
-    for (const param of params) {
-      const m = param.match(/(\w+)\s*:\s*(&mut\s+|&)?\s*(\w+)/);
-      if (!m) continue;
-      const paramName = m[1];
-      const paramType = m[3];
-      if (IDENTITY_NAMES.test(paramName) && paramType === 'address') {
+    // parse each parameter. The type group captures a `::`-qualified path
+    // (sui::tx_context::TxContext) whole, then resolves to its LAST segment
+    // -- never a substring test, which would re-admit MyTxContextWrapper.
+    const params = paramStr.split(',').map(p => p.trim()).filter(Boolean)
+      .map(p => p.match(/(\w+)\s*:\s*(&mut\s+|&)?\s*([\w:]+)/))
+      .filter(Boolean)
+      .map(m => ({ name: m[1], type: m[3].split('::').pop() }));
+
+    // No TxContext, no finding: the rule's own prescribed fix,
+    // tx_context::sender(ctx), needs one to call. A function with no
+    // TxContext parameter cannot apply it -- see the docstring above.
+    const hasCtx = params.some(p => p.type === 'TxContext');
+    if (!hasCtx) continue;
+
+    for (const { name: paramName, type: paramType } of params) {
+      if (containsIdentityWord(paramName) && paramType === 'address') {
         findings.push({
           rule: RULE_ID,
           severity: SEVERITY,

@@ -1,0 +1,5 @@
+{
+  "note": "GHSA-vvr3-fhhp-wvhq: MOV-012's IDENTITY_NAMES regex was exact-anchored, matching a bare word only -- sender_address/caller_addr/owner_account/admin_id/the_sender/senderAddress all scored clean despite being the identical spoofable-identity function. Fixed with #85's own shape (Set of bare words + underscore/camelCase split + exact-word membership) rather than a second approach. #86's narrowing survives unmodified: recipient stays clean, from still fires, no-TxContext produces no finding, and hasCtx still resolves a qualified path's LAST segment without becoming a substring match. Stem-sharing (authorized_by vs authority) does not fire. Includes one loose 40,000-char-identifier timing tripwire, explicitly not a perf SLA.",
+  "type": "script",
+  "script": "test.mjs"
+}

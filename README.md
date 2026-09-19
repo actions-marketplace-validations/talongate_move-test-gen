@@ -119,6 +119,7 @@ node scripts/check-coverage.mjs ./sources ./tests --lint
 | **MOV-008** | MEDIUM | `assert!(payment == required)` exact-equality check on a caller-controlled amount — dust/rounding/fee-on-transfer breaks it; use `>=` instead |
 | **MOV-011** | HIGH | `public(package) entry` function — the `entry` modifier makes it callable via PTB from outside the package despite the `package` restriction |
 | **MOV-012** | HIGH | Sender/caller identity taken as a plain `address` parameter instead of `tx_context::sender(ctx)` — spoofable by any PTB caller |
+| **MOV-013** | HIGH | `#[spec_only]` public function compiles into production bytecode with zero access control — same class as the CDPM $300K drain |
 
 Rules are pure functions in `rules/*.mjs`. The engine skips `#[test_only]` modules and `#[test]` function bodies automatically. MOV-002 and MOV-004 use a lightweight Move parser (`scripts/move-parser.mjs`) to track variable types through declarations, casts, and naming conventions — if an operand is known u128/u256, the finding is suppressed instead of relying on suffix heuristics.
 
@@ -159,13 +160,20 @@ The skill aims for:
 | `0` | clean |
 | `1` | the gate failed — unpaired asserts, surviving mutants, or a lint finding at or above the threshold |
 | `2` | usage error, or a sources/tests directory that cannot be read |
-| `3` | the tool could not run and produced no verdict (for example `--mutate` was requested but the `sui` CLI is missing) |
+| `3` | the tool could not run and produced no verdict (for example `--mutate` was requested but the `sui` CLI is missing, or a lint run hit a `.move` file it could not read — such as an unterminated `/*` block comment) |
 
 `130` and `143` are the usual SIGINT / SIGTERM codes.
 
+**This table is one contract, honored identically by both `scripts/lint.mjs`
+run standalone and `scripts/check-coverage.mjs ... --lint`** (the entry point
+the GitHub Action runs) — both read the same `runLint()`, and an unreadable
+file gets the same exit `3` and the same on-screen message either way.
+
 A defect outranks a missing tool: if Layer 1 found something, the run exits `1`
-even when `--mutate` could not run. Exit `3` means no verdict was reached, which
-is a different thing from a verdict of "failed" and should usually be read as a
+even when `--mutate` could not run. The same precedence holds for an unreadable
+file found by `--lint`, on either entry point: a real finding elsewhere in the
+same run still exits `1`. Exit `3` means no verdict was reached, which is a
+different thing from a verdict of "failed" and should usually be read as a
 broken CI configuration rather than a broken pull request.
 
 ## Running on untrusted code
@@ -236,7 +244,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: talongate/move-test-gen@v1.6.0
+      - uses: talongate/move-test-gen@v1.6.1
         with:
           sources: sources
           tests: tests

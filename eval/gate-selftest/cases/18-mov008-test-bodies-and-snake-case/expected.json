@@ -1,0 +1,5 @@
+{
+  "note": "MOV-008 must not flag a test/test_only function body (the attribute-on-its-own-line shape), must detect a snake_case payment identifier like payment_amount/fee_bps, and must keep both existing exclusions (version/type checks, == 0)",
+  "type": "script",
+  "script": "test.mjs"
+}

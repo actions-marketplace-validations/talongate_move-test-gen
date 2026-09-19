@@ -1,0 +1,5 @@
+{
+  "note": "MOV-012 must not fire on a function with no TxContext (the prescribed fix, tx_context::sender(ctx), is not applicable there) and must not treat recipient as an identity claim; both narrowings measured false positives on the real SuiTears corpus and must not weaken the true-positive shapes. hasCtx must resolve a ::-qualified TxContext to its last segment (never by substring), or a real-world qualified import path silences the whole function.",
+  "type": "script",
+  "script": "test.mjs"
+}

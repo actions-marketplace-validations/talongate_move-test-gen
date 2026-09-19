@@ -437,7 +437,7 @@ import { check as check012 } from '../../../../rules/mov-012-sender-as-address-p
 
 const sender_unsafe = `
 module example::vault {
-    public fun withdraw(sender: address, amount: u64) { }
+    public fun withdraw(sender: address, amount: u64, ctx: &mut TxContext) { }
 }`;
 
 const sender_safe_ctx = `

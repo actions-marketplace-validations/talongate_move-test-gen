@@ -440,8 +440,10 @@ function runJointMutant(packageDir, sourceDir, candidate, probeTimeout = 60000) 
 //   0  clean
 //   1  the gate failed - unpaired asserts, surviving mutants, or a lint
 //      finding at or above the fail-on threshold
-//   2  usage error or unreadable input
-//   3  the tool could not run and produced no verdict
+//   2  usage error, or the sources/tests DIRECTORY itself cannot be read
+//   3  the tool could not run and produced no verdict -- --mutate requested
+//      with no sui CLI, or a --lint FILE inside an otherwise-readable
+//      directory that could not be parsed (an unterminated block comment)
 const EXIT_OK = 0;
 const EXIT_GATE_FAILED = 1;
 const EXIT_USAGE = 2;
@@ -484,6 +486,11 @@ let mutationSkipped = false;
 let mutationReport = null;
 let lintReport = null;
 let gateFailed = false;
+// A --lint file the tool could not read (an unterminated block comment) is
+// the SAME "no verdict reached" class as --mutate finding no sui CLI --
+// both feed the exit-3 branch below, unless a real finding elsewhere
+// outranks them (the same precedence lint.mjs's own standalone CLI uses).
+let lintUnreadable = false;
 
 console.log('=== move-test-gen coverage checker ===\n');
 
@@ -690,28 +697,36 @@ if (unpaired.length === 0) {
 
 // Security lint (optional)
 if (doLint) {
-  const { runLint, printLintResults, shouldFail } = await import('./lint.mjs');
-  // runLint() throws for an unreadable sources dir AND for a malformed rule
-  // file (validateRule()) -- either way this is a config/usage problem, not
-  // a lint verdict, and must not crash uncaught into Node's default exit 1,
-  // the code this tool's own contract reserves for "the gate failed" (real
-  // findings).
-  let findings, ruleCount, suppressed;
+  const { runLint, printLintResults, printUnreadable, shouldFail } = await import('./lint.mjs');
+  // runLint() throws for an unreadable sources DIRECTORY and for a malformed
+  // rule file (validateRule()) -- either way this is a config/usage problem,
+  // not a lint verdict, and must not crash uncaught into Node's default
+  // exit 1, the code this tool's own contract reserves for "the gate
+  // failed" (real findings). A per-FILE content problem inside an otherwise
+  // readable directory -- an unterminated block comment -- is a DIFFERENT
+  // failure class, reported via the returned `unreadable` array below, not
+  // this catch: the directory was readable, one file inside it was not.
+  let findings, ruleCount, suppressed, unreadable;
   try {
-    ({ findings, ruleCount, suppressed } = await runLint(sourceDir, { disable: disabledRules }));
+    ({ findings, ruleCount, suppressed, unreadable } = await runLint(sourceDir, { disable: disabledRules }));
   } catch (e) {
     console.error(`Error: lint could not run — ${e.message}`);
     process.exit(EXIT_USAGE);
   }
-  printLintResults(findings, ruleCount, suppressed);
+  printLintResults(findings, ruleCount, suppressed, unreadable.length > 0);
+  printUnreadable(unreadable);
   lintReport = {
     ruleCount,
     findings: findings.map(f => ({
       file: f.file, line: f.line, rule: f.rule, severity: f.severity, message: f.message,
     })),
+    unreadable,
   };
   if (shouldFail(findings, failOn)) {
     gateFailed = true;
+  }
+  if (unreadable.length > 0) {
+    lintUnreadable = true;
   }
 }
 
@@ -742,9 +757,13 @@ if (doLint || args.includes('--testability')) {
 // A real defect outranks a missing tool: if Layer 1 found something, that is a
 // verdict and it is 1. Exit 3 is reserved for a run that produced no verdict at
 // all, which is why "--mutate could not run" no longer looks like "found a bug".
+// A --lint file the tool could not read joins --mutate's "no sui CLI" in that
+// same exit-3 bucket -- both are "some part of this run reached no verdict",
+// never "we scanned it and it's clean" (EXIT_OK) and never "we found something
+// wrong" (EXIT_GATE_FAILED, which still wins if gateFailed is also true).
 if (gateFailed) {
   process.exitCode = EXIT_GATE_FAILED;
-} else if (mutationSkipped) {
+} else if (mutationSkipped || lintUnreadable) {
   process.exitCode = EXIT_CANNOT_RUN;
 } else {
   process.exitCode = EXIT_OK;

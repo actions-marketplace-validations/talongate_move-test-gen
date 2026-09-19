@@ -67,6 +67,7 @@ function extractConstants(lines) {
  * @typedef {{
  *   name: string,
  *   visibility: 'public'|'public(friend)'|'public entry'|'entry'|'private',
+ *   isMacro: boolean,
  *   typeParams: string[],
  *   params: { name: string, type: string, isMut: boolean, isRef: boolean }[],
  *   returnType: string|null,
@@ -187,7 +188,11 @@ function parseFunctionSignature(lines, startIdx, externalPrefix = '') {
   // the raw one for its own starting line, specifically so a balanced
   // paren pair inside the attribute never gets mistaken for the real
   // parameter list and truncates it early.
-  const sigLine = line.replace(/^(?:#\[[^\]]*\]\s*)+/, '');
+  // A trailing `//` comment is not code -- searching for `fun` unanchored
+  // (below) would otherwise let a comment like "// call fun helper(x) here"
+  // masquerade as a real declaration. Strip it before matching; this never
+  // affects a genuine signature, since `fun`/its params are always CODE.
+  const sigLine = line.replace(/^(?:#\[[^\]]*\]\s*)+/, '').replace(/\/\/.*$/, '');
 
   // match function declaration. `public(package) entry` / `public(friend)
   // entry` (package-scoped in name only -- `entry` makes it a PTB target
@@ -195,7 +200,29 @@ function parseFunctionSignature(lines, startIdx, externalPrefix = '') {
   // bare forms: the bare-form alternatives on their own stop consuming at
   // the closing `)`, so `entry` right after would never be reached without
   // its own explicit alternative.
-  const fnRegex = /^(public\s+entry\s+|public\(package\)\s+entry\s+|public\(friend\)\s+entry\s+|public\(friend\)\s+|public\(package\)\s+|public\s+|entry\s+)?fun\s+(\w+)(?:<([^>]*)>)?\s*\(/;
+  //
+  // `macro` is its OWN optional group, after the visibility alternatives
+  // and before `fun`. Move macros are expanded at the call site and have
+  // no runtime representation (move-book.com/move-basics/macros/), so an
+  // `entry` marker on one is at best meaningless -- but the Move Book
+  // does not state that `entry macro` is rejected, so the group is
+  // placed to parse it if it appears rather than to assume it cannot:
+  // `public(package) entry macro fun f(...)` still matches (the entry
+  // alternatives above consume first, `macro` consumes next), and
+  // MOV-011 still fires on it unchanged.
+  //
+  // NOT anchored with `^`: a one-line module (`module d::m { public fun
+  // f(...) { ... } }`) packs the module header, and possibly a closing
+  // brace from a prior statement, onto the SAME physical line as the
+  // function signature -- an anchored match can never reach `fun` there.
+  // Un-anchoring is a strict superset for every existing multi-line caller:
+  // a signature that already started at column 0 still matches at the same
+  // position (nothing precedes it to try first), so no prior behavior
+  // changes; it additionally finds a signature that starts mid-line. Both
+  // properties (the macro group AND the un-anchoring) are independent --
+  // merged from two branches that each added one -- so a one-line module
+  // whose function is a macro is matched too.
+  const fnRegex = /(public\s+entry\s+|public\(package\)\s+entry\s+|public\(friend\)\s+entry\s+|public\(friend\)\s+|public\(package\)\s+|public\s+|entry\s+)?(macro\s+)?fun\s+(\w+)(?:<([^>]*)>)?\s*\(/;
   const m = sigLine.match(fnRegex);
   if (!m) return null;
 
@@ -207,16 +234,20 @@ function parseFunctionSignature(lines, startIdx, externalPrefix = '') {
     visRaw.includes('entry') && visRaw.includes('public') ? 'public entry' :
     visRaw.includes('entry') ? 'entry' : 'public';
 
-  const name = m[2];
-  const typeParams = m[3] ? m[3].split(',').map(t => t.trim()) : [];
+  const isMacro = Boolean(m[2]);
+  const name = m[3];
+  const typeParams = m[4] ? m[4].split(',').map(t => t.trim()) : [];
 
   // Where the REAL parameter list's own opening paren sits in sigLine --
   // fnRegex's match already ends with `\s*\(`, consuming exactly up to and
-  // including it, so m[0]'s length is that position. A visibility prefix
-  // can carry its own balanced parens before this point (`public(package)`,
+  // including it, so m.index + m[0].length is that position (m.index is 0
+  // for every pre-existing multi-line caller, where the signature already
+  // started at column 0; it is nonzero only for the one-line-module case
+  // the unanchored regex above now also matches). A visibility prefix can
+  // carry its own balanced parens before this point (`public(package)`,
   // `public(friend)`) -- starting the scan here, not at char 0, is what
   // keeps them from being mistaken for the parameter list itself.
-  const parenStart = m[0].length - 1;
+  const parenStart = m.index + m[0].length - 1;
 
   // collect full parameter list (may span multiple lines)
   let paramStr = '';
@@ -255,6 +286,7 @@ function parseFunctionSignature(lines, startIdx, externalPrefix = '') {
   return {
     name,
     visibility,
+    isMacro,
     typeParams,
     params,
     returnType,
@@ -275,7 +307,13 @@ function parseParams(paramStr) {
   let current = '';
   for (const ch of paramStr) {
     if (ch === '<') depth++;
-    if (ch === '>') depth--;
+    // Clamped at 0, never negative: a macro lambda-type param
+    // (`$f: |u64| -> u64`) carries a bare `>` in its `->` that never
+    // opened a `<` -- an unclamped depth-- drives depth negative, and
+    // the NEXT real top-level comma (separating this param from the
+    // next) then fails its `depth === 0` check and gets silently
+    // swallowed into the current param's text instead of splitting.
+    if (ch === '>' && depth > 0) depth--;
     if (ch === ',' && depth === 0) {
       params.push(parseOneParam(current.trim()));
       current = '';
@@ -289,8 +327,12 @@ function parseParams(paramStr) {
 
 function parseOneParam(s) {
   if (!s) return null;
-  // patterns: `name: Type`, `name: &Type`, `name: &mut Type`, `_: Type`
-  const m = s.match(/(\w+)\s*:\s*(&mut\s+|&)?(.+)/);
+  // patterns: `name: Type`, `name: &Type`, `name: &mut Type`, `_: Type`,
+  // `$name: Type` (a macro's own expression/type parameter -- Move 2024
+  // prefixes both with `$`; keeping it here is what lets the body-level
+  // extraction below match the SAME source text a macro body actually
+  // uses, e.g. `$a * $b`, rather than a name the source never contains).
+  const m = s.match(/(\$?\w+)\s*:\s*(&mut\s+|&)?(.+)/);
   if (!m) return null;
   // clean trailing parens/commas/whitespace from type
   const rawType = m[3].trim().replace(/[),;\s]+$/, '');
@@ -438,8 +480,12 @@ function parseBody(bodyLines, offset) {
       });
     }
 
-    // multiplications
-    for (const mm of codeOnly.matchAll(/(\w+)\s*\*\s*(\w+)/g)) {
+    // multiplications. `\$?` tolerates a macro's own `$`-prefixed
+    // parameter used directly as an operand (`$a * $b`) -- without it,
+    // `\w+` cannot match a `$`-led token at all, so a macro body
+    // multiplying two of its own params was invisible here, not merely
+    // mis-typed: MOV-002 had nothing in `multiplications` to iterate.
+    for (const mm of codeOnly.matchAll(/(\$?\w+)\s*\*\s*(\$?\w+)/g)) {
       multiplications.push({
         line: lineNo,
         left: mm[1],
@@ -449,8 +495,10 @@ function parseBody(bodyLines, offset) {
       });
     }
 
-    // divisions
-    for (const dm of codeOnly.matchAll(/(\w+)\s*\/\s*(\w+)/g)) {
+    // divisions -- same `\$?` tolerance, same reason, kept in sync with
+    // the multiplication regex directly above rather than left as a
+    // matching twin with the identical unfixed gap.
+    for (const dm of codeOnly.matchAll(/(\$?\w+)\s*\/\s*(\$?\w+)/g)) {
       divisions.push({
         line: lineNo,
         numerator: dm[1],
